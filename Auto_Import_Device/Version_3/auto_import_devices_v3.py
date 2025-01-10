@@ -13,6 +13,7 @@ filepath = config.filepath
 NetBox_URL = config.NetBox_URL
 NetBox_Token = config.NetBox_Token
 sitename = config.sitename
+global df
 
 def file_check(input_file):
     if os.path.exists(input_file):
@@ -21,7 +22,7 @@ def file_check(input_file):
         sheet = workbook.active
         data = [[cell.value for cell in row] for row in sheet.iter_rows(min_row=2)]
         columns = [cell.value for cell in sheet[1]]  
-        global df
+        
         df = pd.DataFrame(data, columns=columns)
         #df = df.dropna(subset=['Name'], how='all')
         required_columns = ['Role','Type','Serial Number']
@@ -71,8 +72,7 @@ def handle_duplicate_names(df, name_col, serial_col):
 
     for name in duplicates:
         duplicate_rows = df[df[name_col] == name].index
-        for i, row in enumerate(duplicate_rows, start=1):
-            #rack_value = df.at[row, rack_col]
+        for row in enumerate(duplicate_rows, start=1):
             serial_value = df.at[row, serial_col]
             df.at[row, name_col] = f"{name}_{serial_value}"
     return df

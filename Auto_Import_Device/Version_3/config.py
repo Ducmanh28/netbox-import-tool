@@ -13,3 +13,5 @@ status = 'active'
 # Thông tin nếu add Rack Mới
 width=19
 u_height=42
+
+TAG_NAME_AUTO_IMPORT = ["AutoImportExcel", "Tag1"]

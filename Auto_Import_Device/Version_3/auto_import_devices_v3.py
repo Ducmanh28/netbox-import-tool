@@ -1,3 +1,4 @@
+import time
 import os
 import pandas as pd
 import pynetbox
@@ -7,36 +8,51 @@ import urllib3
 import warnings
 from urllib3.exceptions import InsecureRequestWarning
 from openpyxl import load_workbook
+from datetime import datetime
+import random
 import config
 
-filepath = config.filepath
+WIDTH=config.width
+U_HEIGHT=config.u_height
+STATUS = config.status
+TAG_NAME_AUTO_IMPORT = config.TAG_NAME_AUTO_IMPORT
+FILE_PATH = config.filepath
 NetBox_URL = config.NetBox_URL
 NetBox_Token = config.NetBox_Token
-sitename = config.sitename
-global df
 
+SITE_NAME = config.sitename # Site của  netbox
+SHEET_NAME = 'Input' # Tên của sheet muốn import
+# Khai báo biến global
+TAG_ID_AUTO_IMPORT = []
+DEVICE_HEIGHTS =  []
+LIST_ADD_DEVICE_ROLE_ERROR = []
+LIST_ADD_MANUFACTURES_ERROR = []
+LIST_ADD_DEVICE_TYPE_ERROR = []
+LIST_ADD_DEVICE_ERROR = []
+
+# Class lưu thông tin độ cao của device type
+class DeviceHight:
+    def __init__(self, name, height):
+        self.name = name
+        self.height = height
+    
+    def __repr__(self):
+        return f"DeviceHight(name='{self.name}', height={self.height})"
+    
 def file_check(input_file):
     if os.path.exists(input_file):
+        # read file excel
         workbook = load_workbook(input_file)
         global sheet
         sheet = workbook.active
-        data = [[cell.value for cell in row] for row in sheet.iter_rows(min_row=2)]
+        global df
         columns = [cell.value for cell in sheet[1]]  
-        
-        df = pd.DataFrame(data, columns=columns)
-        #df = df.dropna(subset=['Name'], how='all')
-        required_columns = ['Role','Type','Serial Number']
-        for index, row in df.iterrows():
-            if pd.notna(row['Name']):
-                missing_columns = [col for col in required_columns if pd.isnull(row[col])]
-                if missing_columns:
-                    print(f"Error: Row {index + 2} is missing values in columns: {missing_columns}")
-                    exit()
-        print("File Check complete!")
+        # new code
+        df = pd.read_excel(input_file, sheet_name=SHEET_NAME)
     else:
-        print(f"File '{input_file}' doesn't exist!")
+        print(f"File '{input_file}' doesn't exist! Please check again!")
         exit()
-    
+
 def netbox_connection_check(netboxurl, netboxtoken):
     try:
         warnings.simplefilter("ignore", InsecureRequestWarning)  
@@ -66,100 +82,6 @@ def netbox_connection_check(netboxurl, netboxtoken):
         print(f"Error: An unknown error occurred. More: {e}")
     return None
 
-def handle_duplicate_names(df, name_col, serial_col):
-    name_counts = df[name_col].value_counts()
-    duplicates = name_counts[name_counts > 1].index  # Lấy các giá trị Name bị trùng
-
-    for name in duplicates:
-        duplicate_rows = df[df[name_col] == name].index
-        for row in enumerate(duplicate_rows, start=1):
-            serial_value = df.at[row, serial_col]
-            df.at[row, name_col] = f"{name}_{serial_value}"
-    return df
-
-def excute_merge_data(df, sheet):
-    try:
-        df['u_height'] = 1
-        for merged_cells in sheet.merged_cells.ranges:
-            min_row, min_col, max_row, max_col = merged_cells.min_row, merged_cells.min_col, merged_cells.max_row, merged_cells.max_col
-            if min_col == 3 and max_col == 3:
-                merge_height = max_row - min_row + 1
-                merged_rows = list(range(min_row - 2, max_row - 1))  
-                df.loc[merged_rows, 'u_height'] = merge_height
-                if merge_height == 2:
-                    df.loc[merged_rows, 'Position'] = df.loc[merged_rows, 'Position'] - 1
-                elif merge_height == 3:
-                    df.loc[merged_rows, 'Position'] = df.loc[merged_rows, 'Position'] - 2
-                elif merge_height == 4:
-                    df.loc[merged_rows, 'Position'] = df.loc[merged_rows, 'Position'] - 3
-                elif merge_height == 6:
-                    df.loc[merged_rows, 'Position'] = df.loc[merged_rows, 'Position'] - 5
-        return df
-    except Exception as e:
-        print(f"Error while excuting merge_data: {e}")
-        exit()   
-           
-def device_types_check():
-    device_types_in_file = df['Type'].dropna().tolist() 
-    device_types_not_in_netbox = []
-    for device_type in device_types_in_file:
-        search_result = nb.dcim.device_types.filter(model=device_type)
-        if not search_result:
-            device_types_not_in_netbox.append(device_type)
-    device_type_not_in_netbox = []
-    for device_type in device_types_not_in_netbox:
-        if device_type not in device_type_not_in_netbox:
-            device_type_not_in_netbox.append(device_type)
-    if device_type_not_in_netbox:
-        print("Device Types not in NetBox:")
-        print(device_type_not_in_netbox)
-        print("\nDo you want to add Device Type automatically?")
-        choice = input("Enter your choice? (yes/no): ")
-        if choice == 'no':
-            print("\nPlease Add Device Types manually!")
-            exit()
-        elif choice == "yes":
-            print("You chose to Add Device Types Automatically with sample information")
-            print("Trying to Add Automatically...")
-            for device_type in device_type_not_in_netbox:
-                try:
-                    matching_rows = df[df['Type'] == device_type]
-                    if matching_rows.empty:
-                        print(f"Device type {device_type} not found in Excel. Skipping...")
-                        continue
-                    row = matching_rows.iloc[0]
-                    manufacturer_name = row['Manufacturer'].strip()
-                    u_height = row['u_height']
-                    u_height = int(u_height)
-                    manufacturer_records = nb.dcim.manufacturers.filter(name=manufacturer_name)
-                    manufacturer = None
-                    for record in manufacturer_records:
-                        manufacturer = record
-                        break  
-                    if manufacturer:
-                        print(f"Using existing manufacturer: {manufacturer.name} (ID: {manufacturer.id})")
-                    else:
-                        manufacturer_slug = re.sub(r'[^a-z0-9-]', '-', manufacturer_name.lower()).strip('-')
-                        manufacturer = nb.dcim.manufacturers.create(
-                            name=manufacturer_name,
-                            slug=manufacturer_slug  
-                        )
-                        print(f"Created new manufacturer: {manufacturer.name} (ID: {manufacturer.id})")
-                    device_type_slug = re.sub(r'[^a-z0-9-]', '-', device_type.lower()).strip('-')
-                    new_device_type = nb.dcim.device_types.create({
-                        'model': device_type,
-                        'slug': device_type_slug,
-                        'manufacturer': manufacturer.id,
-                        'u_height': u_height,
-                        'is_full_depth': 'yes',
-                    })
-                    print(f"Automatically added: {device_type}")
-                except Exception as e:
-                    print(f"Error while adding {device_type}: {e}, Data: {row.to_dict()}")
-                    exit()
-    else:
-        print("Device Types check complete!")
-        
 def site_check(site_name):
     site_record = nb.dcim.sites.get(name=site_name)
     if site_record:
@@ -172,61 +94,91 @@ def site_check(site_name):
             new_site = nb.dcim.sites.create(
                 name=site_name,
                 slug=site_name.lower().replace(" ", "-"),
-                status=config.status,
+                tags=TAG_ID_AUTO_IMPORT,
+                status=STATUS,
                 description='Create by Auto_Import_Tool',
             )
             print(f"Successfully created Site: {site_name}")
         else:
             print("Please check the Site again before using this Tool!")
-            
-def get_role(role_value):
-        if isinstance(role_value, str):  
-            if role_value.lower() == 'fw':
-                return 'Firewall'
-            elif role_value.lower() == 'sw':
-                return 'Switch'
-            elif role_value.lower() == 'svr':
-                return 'Server'
-            elif role_value.lower() == 'r':
-                return 'Router'
-            else:
-                return 'Unknown'
-        return None  
+
+# Hàm check xem có tag AutoImportExcel chưa
+def tag_check():
+    # get tag 
+    for tag in TAG_NAME_AUTO_IMPORT: 
+        print(tag)
+        # check exist tag 
+        tag_exist = nb.extras.tags.filter(name=tag)
+        # add tag id to array id
+        if not tag_exist:
+            try:
+                new_tag = nb.extras.tags.create(
+                    name=tag,
+                    slug=tag,
+                    color="9e9e9e",
+                    description= f'Create tag {tag}',
+                )
+                print(f"Create success tag {tag}")
+                # get ID tag 
+                tag_id = get_tag_id(tag)
+                TAG_ID_AUTO_IMPORT.append(tag_id)
+            except:
+                print(f"Error while creating tag {tag}")
+        else:
+            # get ID tag
+            tag_id = get_tag_id(tag)
+            TAG_ID_AUTO_IMPORT.append(tag_id)
+
+def get_tag_id(tag_name):
+    tag_auto_import_excel = nb.extras.tags.filter(name=tag_name)
+    first_tag = next(tag_auto_import_excel, None)
+    if first_tag:
+        return first_tag.id
 
 def device_role_check():
-    device_role_names = df['Role'].dropna().drop_duplicates().apply(get_role).tolist()
-    all_roles_exist = True  
-    missing_roles = []
+    device_role_names = df["Role"].dropna().tolist() 
+    device_role_names = [item.strip() for item in device_role_names] 
+    device_role_names = list(set(device_role_names)) 
+
+    all_roles_exist = True # tất cả đã tồn tại chưa
+    missing_roles = [] # danh sách các roles chưa có 
+
+    # tìm kiếm các role bị thiếu
     for device_roles in device_role_names:
         dvr = nb.dcim.device_roles.filter(name=device_roles)
         if not dvr:
-            print(f"Device Role: {device_roles} does not exist in NetBox, please check again!")
+            print(f"Device Role: {device_roles} does not exist in NetBox")
             all_roles_exist = False  
             missing_roles.append(device_roles)
+    
+    # kiểm tra tất cả role đã tồn tại hay chưa
     if all_roles_exist:
         print("Device Role check complete: All roles exist in NetBox!")
     else:
         print("Do you want to auto add Role?")
         choice = input("yes/no: ").strip().lower()
-
         if choice == 'yes':
             for role in missing_roles:
                 try:
                     new_role = nb.dcim.device_roles.create(
                         name=role,
                         slug=role.lower().replace(" ", "-"),
+                        tags=TAG_ID_AUTO_IMPORT,
                         color="9e9e9e",
-                        description='Create by Auto_Import_Tool',  
+                        description='Device role was created by Auto_Import_Tool',  
                     )
-                    print(f"Successfully created Device Role: {new_role['name']}")
+                    print(f"Successfully create Device Role: {new_role['name']}")
                 except Exception as e:
+                    LIST_ADD_DEVICE_ROLE_ERROR.append(role)
                     print(f"Failed to create Device Role {role}: {e}")
         else:
             print("No roles were added. Please update NetBox manually if needed.")
             exit()
         
 def rack_check():
-    rack_names = df['Rack'].dropna().drop_duplicates().tolist()
+    rack_names = df['Rack'].drop_duplicates().dropna().tolist()
+    rack_names = [item.strip() for item in rack_names] # Xoá space cho các item
+    rack_names = list(set(rack_names))# lọc trùng
     missing_racks = []
     for rack_name in rack_names:
         record = nb.dcim.racks.get(name=rack_name)
@@ -235,31 +187,202 @@ def rack_check():
         else:
             print(f"Rack '{rack_name}' does not exist in NetBox!")
             missing_racks.append(rack_name)
+    
     if missing_racks:
         print("Do you want to auto add new Rack?")
         choice = input("yes/no: ").strip().lower()
         if choice == 'yes':
             for rack in missing_racks:
                 try:
-                    site = nb.dcim.sites.get(name=config.sitename)
+                    site = nb.dcim.sites.get(name=SITE_NAME)
+                    if not site:
+                        print(f"Site '{SITE_NAME}' does not exist in NetBox. Please create it first.")
+                        break
                     new_rack = nb.dcim.racks.create(
                         site=site.id,
                         name=rack,
                         status='active',
-                        width=config.width,
-                        u_height=config.u_height,
+                        tags=TAG_ID_AUTO_IMPORT,
+                        width=WIDTH,
+                        u_height=U_HEIGHT,
                         description='Create by Auto_Import_Tool',
                     )
-                    print(f"Successfully created Rack: {new_rack['name']}")
+                    print(f"Successfully create Rack: {new_rack['name']}")
                 except Exception as e:
                     print(f"Failed to create Rack {rack}: {e}")
         else:
             print("No racks were added. Please update NetBox manually if needed.")
+            exit()
     else:
         print("Rack Check complete: All racks exist in NetBox!")
-   
+
+def manufacturer_check():
+    manufacturer_names = df["Manufacturer"].dropna().tolist()
+    manufacturer_names = [item.strip() for item in manufacturer_names] # Xoá space cho các item
+    manufacturer_names = list(set(manufacturer_names))# lọc trùng
+
+    all_manufacturers_exist = True  
+    missing_manufacturers = []
+    for manufacturer in manufacturer_names:
+        manus = nb.dcim.manufacturers.filter(name=manufacturer)
+        if not manus:
+            print(f"Manufacturer: {manufacturer} does not exist in NetBox, please check again!")
+            all_manufacturers_exist = False  
+            missing_manufacturers.append(manufacturer)
+
+    if all_manufacturers_exist:
+        print("Device manufacturer check complete: All manufacturers exist in NetBox!")
+    else:
+        print("Do you want to auto add manufacturer?")
+        choice = input("yes/no: ").strip().lower()
+
+        if choice == 'yes':
+            for manufacturer in missing_manufacturers:
+                try:
+                    new_manufacturer = nb.dcim.manufacturers.create(
+                        name=manufacturer,
+                        slug=manufacturer.lower().replace(" ", "-"),
+                        tags=TAG_ID_AUTO_IMPORT,
+                        description='Create manufacture by Auto_Import_Tool',  
+                    )
+                    print(f"Successfully created Manufacture: {new_manufacturer['name']}")
+                except Exception as e:
+                    LIST_ADD_MANUFACTURES_ERROR.append(manufacturer)
+                    print(f"Failed to create Manufacture {manufacturer}: {e}")
+        else:
+            print("No manufacturers were added. Please update NetBox manually if needed.")
+            exit()
+
+def custom_field_check():
+    custom_field_names = ["device_owner", "contract_number" ,"year_of_investment"]
+    all_custom_field_exist = True  
+    missing_custom_field = []
+    for custom_field in custom_field_names:
+        dvr = nb.extras.custom_fields.filter(name=custom_field)
+        if not dvr:
+            print(f"Custom_field: {custom_field} does not exist in NetBox")
+            all_custom_field_exist = False  
+            missing_custom_field.append(custom_field)
+
+    if all_custom_field_exist:
+        print("Device Custom_field check complete: All custom_field exist in NetBox!")
+    else:
+        print("Do you want to auto add custom_field?")
+        choice = input("yes/no: ").strip().lower()
+
+        if choice == 'yes':
+            for custom_field in missing_custom_field:
+                try:
+                    
+                    type_custom_field = "text"
+                    new_custom_field = nb.extras.custom_fields.create({
+                        "name" : custom_field,
+                        "type" : type_custom_field,
+                        "object_types" : ["dcim.device"],
+                        "search_weight" : 1000,
+                        "weight" : 100,
+                        "tags": TAG_ID_AUTO_IMPORT,
+                        "filter_logic" : "loose",
+                        "ui_visible" : "always",
+                        "ui_editable" : "yes",
+                        "description" : 'Create by Auto_Import_Tool',
+                    })
+                    print(f"Successfully created custom field : {new_custom_field['name']}")
+                except Exception as e:
+                    print(f"Failed to create custom field {custom_field}: {e}")
+        else:
+            print("No custom_field were added. Please update NetBox manually if needed.")
+            exit()
+
+#Hàm tạo ra mảng chứa trường name và u_height của device_type
+def device_type_height():
+    # Tìm u_height của device type 
+    for merged_range in sheet.merged_cells.ranges:
+        # Lấy giá trị ở cột  H
+        if merged_range.min_col == 8 and merged_range.max_col != merged_range.max_row:
+            # lấy value của ô 
+            top_left_cell = sheet.cell(merged_range.min_row, merged_range.min_col)
+            device_type_name = top_left_cell.value
+
+            # Tính các row đã merg của ô
+            rows_spanned = merged_range.max_row - merged_range.min_row + 1
+
+            exists = any(device.name == device_type_name for device in DEVICE_HEIGHTS)
+            # kiểm tra giá trị đã có trong list chưa
+            if not exists:
+                new_device_height =  DeviceHight(device_type_name,rows_spanned)
+                DEVICE_HEIGHTS.append(new_device_height)     
+
+# Hàm auto add device type vào netbox
+def device_types_check():
+    device_types_in_file = df['Type'].dropna().tolist() 
+    device_types_in_file = [item.strip() for item in device_types_in_file] # Xoá space cho các item
+    device_types_in_file = list(set(device_types_in_file)) # lọc trùng
+    
+    device_type_not_in_netbox = []
+
+    # Tìm phần tử chưa có trong netbox
+    for device_type in device_types_in_file:
+        search_result = nb.dcim.device_types.filter(model=device_type)
+        if not search_result:
+            print(f"Device Type: {device_type} not have in NetBox!")
+            device_type_not_in_netbox.append(device_type)
+
+    if device_type_not_in_netbox:
+        print("\nDo you want to add Device Type automatically?")
+        choice = input("Enter your choice? (yes/no): ")
+
+        if choice == 'no':
+            print("\nPlease Add Device Types manually!")
+            exit()
+        elif choice == "yes":
+            print("You chose to Add Device Types Automatically with sample information")
+            print("Trying to Add Automatically...")
+            for device_type in device_type_not_in_netbox:
+                try:
+                    # Tìm manufature của device type trong danh sách 
+                    all_manufacturer_device_type = df[["Manufacturer","Type"]].dropna()
+                    # manufacturer_device_type = all_manufacturer_device_type.query(f"Type == '{device_type}'")
+                    manufacturer_device_type = all_manufacturer_device_type[all_manufacturer_device_type['Type'].str.contains(device_type, case=False)]
+                    manufacturer_name = manufacturer_device_type.iloc[0]['Manufacturer']
+                    manufacturer_name = manufacturer_name.strip()
+                    manufacturer = nb.dcim.manufacturers.get(name = manufacturer_name)
+
+                    # Kiểm tra xem có tìm thấy manuyfacturers không
+                    if not manufacturer: 
+                        print(f"Error while adding {device_type}: Not found manufactures")
+                        continue
+                    # Lấy chiều cao trong list đã tạo
+                    device_height = 1 # mặc định height bằng 1 
+                    
+                    #Tìm kiếm trong danh sách thiết bị có height > 1
+                    for device in DEVICE_HEIGHTS:
+                        if device.name == device_type:
+                            device_height = device.height
+                            break
+                    
+                    # create device type
+                    device_type_slug = re.sub(r'[^a-z0-9-]', '-', device_type.lower()).strip('-')
+                    new_device_type = nb.dcim.device_types.create({
+                        'model': device_type,
+                        'slug': device_type_slug,
+                        'manufacturer': manufacturer.id,
+                        "tags": TAG_ID_AUTO_IMPORT,
+                        'u_height': device_height,
+                        'is_full_depth': 'yes',
+                    })
+
+                    print(f"Automatically added success: {new_device_type}")
+                    
+                except Exception as e:
+                    print(f"Error while adding {device_type}: {e}")
+                    LIST_ADD_DEVICE_TYPE_ERROR.append(device_type)
+    else:
+        print("Device Types check complete!")
+    
 def get_device_types_ids(device_types_names):
     try:
+        device_types_names = device_types_names.strip()
         device_types = nb.dcim.device_types.filter(name=device_types_names)
         if device_types:
             for device_type in device_types:
@@ -274,6 +397,7 @@ def get_device_types_ids(device_types_names):
     
 def get_device_roles_ids(device_role_name):
     try:
+        device_role_name = device_role_name.strip()
         device_roles = nb.dcim.device_roles.filter(name=device_role_name)
         if device_roles:
             for device_role in device_roles:
@@ -296,104 +420,186 @@ def get_site_id(site_name):
     
 def get_rack_id(rack_name):
     try:
+        rack_name = rack_name.strip()
         rack = nb.dcim.racks.get(name=rack_name)
         return rack.id
     except Exception as e:
         print(f"Error fetching rack '{rack_name}': {e}")
         return None
+
+# Hàm auto add device vào netbox
+def import_device_to_NetBox():
+    # list device need add 
+    device_names = df[["Rack", "U", "Manufacturer", "Name", "Role", "Owner Device",  "Contract number","Type", "Serial Number","Year of Investment", "Comments"]]
+    device_names= device_names[device_names['Name'].notna()] # lọc tất cả hàng có trường Name là nan
     
-def import_device_to_NetBox(df):
-    df = df.dropna(subset=['Name'], how='all')
-    df = handle_duplicate_names(df, name_col='Name', serial_col='Serial Number')
-    device_names = df['Name'].dropna().tolist()
-    number_of_device_in_file = 0
-    number_of_device_has_been_added = 0
-    df['role'] = df['Role'].apply(get_role)
-    df['description'] = df['Description'].fillna('No data yet')
-    
-    for device_name in device_names:
-        matching_rows = df[df['Name'] == device_name]
-        if matching_rows.empty:
-            print(f"Device Name {device_name} not found in Excel. Skipping...")
-            continue
-        
-        number_of_device_in_file += 1
-        row = matching_rows.iloc[0]
-        device_role = row.get('role')
-        name = row.get('Name')
-        rack = row.get('Rack')
-        device_types = row.get('Type')
-        serial_number = row.get('Serial Number', ' ')
-        description = row.get('description', ' ')
-        contract_number = row.get('Contract Number', ' ')
-        year_of_investment = row.get('Year of Investment', ' ')
-        device_owner = row.get('Device Owner', ' ')
-        position = int(row.get('Position'))
-        
-        device_types_id = get_device_types_ids(device_types)
-        device_roles_id = get_device_roles_ids(device_role)
-        rack_id = get_rack_id(rack)
-        site_id = get_site_id(site_name=sitename)
-        
-        existing_device = nb.dcim.devices.get(name=name, site_id=site_id)
-        if existing_device:
-            print(f"Device '{name}' already exists in NetBox. Skipping...")
-            continue
+    #list_device_need_to_add = []
+    #for device in device_names:
+    #    search_results = nb.dcim.devices.filter(name=device)
+    #    if search_results:
+    #        print(f"Device: {device} has existed in NetBox. Skipping...!")
+    #    else:
+    #        list_device_need_to_add.append(device)
+    number_of_device_in_file = 0 # Số lượng device đã được add 
+    number_of_device_has_been_added = 0 # Tổng số lượn device trong danh sách
+
+    # check device have serial number null
+    device_null_serial_numbers = device_names[device_names['Serial Number'].isnull()]
+    if len(device_null_serial_numbers) > 0:
+        print(f"List device have serial_number null:\n {device_null_serial_numbers}")
+        print("Do you want add serial_number null?")
+
+        choice = input("Enter your choice? (yes/no): ")
+        if choice == "yes":
+            print("\nPlease Add Device Types manually!")
+            exit()
+
+    for row in device_names.iterrows():
+        number_of_device_in_file+=1
 
         try:
+            # Thêm mới device đến netbox
+            rack_id = get_rack_id(row['Rack'])
+            site_id = get_site_id(site_name=SITE_NAME)
+            device_types_id = get_device_types_ids(row['Type'])
+            device_roles_id = get_device_roles_ids(row['Role'])
+
+            # Xử lý trường position
+            device_position = row['U']
+            #Tìm kiếm trong danh sách thiết bị có height > 1
+            for device in DEVICE_HEIGHTS:
+                if device.name == row['Type']:
+                    device_position = device_position - device.height + 1
+                    break
+
+            #Kiểm tra nan cho các param 
+            device_description = ""
+            device_owner = ""
+            contract_number = ""
+            device_year_of_investment = ""
+            device_serial_number = ""
+
+            if not pd.isna(row['Comments']):
+                device_description = row['Comments']
+
+            if not pd.isna(row['Owner Device']):
+                device_owner = row['Owner Device']
+
+            if not pd.isna(row['Contract number']):
+                contract_number = row['Contract number']
+
+            if not pd.isna(row['Year of Investment']):
+                device_year_of_investment = row['Year of Investment']
+                if type(device_year_of_investment) is datetime:
+                    device_year_of_investment = device_year_of_investment.strftime("%d/%m/%Y")
+                elif type(device_year_of_investment) is int:
+                    device_year_of_investment = str(device_year_of_investment)
+
+            # Nếu như không phải null thì sẽ lấy giá trị đó (Mặc định là random)
+            if not pd.isna(row['Serial Number']):
+                device_serial_number = row['Serial Number']
+            else:
+                random_number = random.randint(100000, 999999)
+                device_serial_number = random_number
+
+            # kiểm tra xem device name đã được add trên netbox chưa
+            device_name = row['Name']
+            device_name = device_name.strip()
+            exist_device = nb.dcim.devices.get(name=device_name)
+            if exist_device:
+                serial_number_random = random.randint(100000, 999999)
+                device_name = device_name + f"-{serial_number_random}"
+
             new_device = nb.dcim.devices.create(
                 {
-                    "name": name,
+                    "name": device_name,
                     "device_type": device_types_id,
                     "role": device_roles_id,
                     "site": site_id,
-                    "serial": serial_number,
+                    "serial": device_serial_number,
                     "rack": rack_id,
                     "face": "front",
-                    "position": position,
-                    "status": config.status,
-                    "description": description,
+                    "position": device_position,
+                    "tags":TAG_ID_AUTO_IMPORT,
+                    "status": STATUS,  
+                    "description": device_description,
                     "custom_fields": {
                         "device_owner": device_owner,
                         "contract_number": contract_number,
-                        "years_of_investment": year_of_investment
+                        "year_of_investment": device_year_of_investment,
                     }
                 }
             )
-            number_of_device_has_been_added += 1
-            print(f"Successfully created device: {name}")
+            
+            number_of_device_has_been_added+=1
+            print(f"Successfully created device: {device_name}")
+        except pynetbox.RequestError as e:
+            # Handle errors
+            LIST_ADD_DEVICE_ERROR.append(device_name)
+            if "non_field_errors" in e.error:
+                print(f"Vị trí U-{device_position} ở tủ Rack {row['Rack']} đã có thiết bị")
+            elif "position" in e.error: 
+                print(f"Khoảng trống của vị trí  U-{device_position} ở tủ Rack {row['Rack']} không đủ cho thiết bị")
+            else:
+                print(f"Error while creating device '{device_name}': {e}")
         except Exception as e:
-            print(f"Error creating device '{name}': {e}")
-    
+            LIST_ADD_DEVICE_ERROR.append(device_name)
+            print(f"Error while creating device '{device_name}': {e}")
+            
     if number_of_device_has_been_added > 0:
-        print(f"{number_of_device_has_been_added}/{number_of_device_in_file} devices have been added to NetBox!")
-
+        print(f"{number_of_device_has_been_added}/{number_of_device_in_file} device has been added to NetBox!" )
 
 def main():
     try:
+        start_time = time.time()  # Thời gian bắt đầu
         print("Step 1: Checking input file...")
-        file_check(filepath)
+        file_check(FILE_PATH)
         
         print("Step 2: Checking NetBox connection...")
         netbox_connection_check(NetBox_URL, NetBox_Token)
-        
-        print("Step 3: Excuting Merge data...")
-        excute_merge_data(df=df,sheet=sheet)
 
-        print("Step 4: Checking data in NetBox...")
-        site_check(site_name=sitename)
+        print(f"Step 3: Checking Tag exist...")
+        tag_check()
+
+        print("Step 4: Checking Site...")
+        site_check(site_name=SITE_NAME)
+
+        print("Step 5: Checking Rack...")
         rack_check()
+
+        print("Step 6: Checking Device Role...")
         device_role_check()
+        
+        print("Step 7: Checking Manufacturer...")
+        manufacturer_check()
+
+        print("Step 8: Checking Custom field")
+        custom_field_check()
+        
+        print("Step 9: Checking height of Device Type...")
+        device_type_height()
+
+        print("Step 10: Checking Device Type...")
         device_types_check()
 
-        print("Step 5: Importing Devices into NetBox...")
-        import_device_to_NetBox(df)
+        print("Step 11: Importing Devices into NetBox...")
+        import_device_to_NetBox()
 
+        print(f"List Manufacture error while create new record:\n {LIST_ADD_MANUFACTURES_ERROR}")
+
+        print(f"List Device Type error while create new record:\n {LIST_ADD_DEVICE_TYPE_ERROR}")
+
+        print(f"List Device Role error while create new record:\n {LIST_ADD_DEVICE_ROLE_ERROR}")
+
+        print(f"List Device error while create new record:\n {LIST_ADD_DEVICE_ERROR}")
+
+        end_time = time.time()  # Thời gian kết thúc
+        duration = end_time - start_time  # Thời gian xử lý
+        duration_total = round(duration / 60, 2)
+        print(f"Time import file: {duration_total} m")
         print("Process completed successfully!")
-
     except Exception as e:
         print(f"Error during execution: {e}")
 
 if __name__ == "__main__":
     main()
-
